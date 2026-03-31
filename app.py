@@ -1,9 +1,9 @@
 import os
+import re
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
 from openai import OpenAI
-import re
 
 api = FastAPI()
 
@@ -23,46 +23,40 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
     @slack_app.event("app_mention")
     def handle_mention(body, say):
         raw_text = body["event"]["text"]
-        # Strip the bot mention tag (e.g. <@U12345>)
         text = re.sub(r"<@\w+>", "", raw_text).strip()
 
         if not openai_client:
-            say("⚠️ OPENAI_API_KEY is missing in Railway.")
+            say("OPENAI_API_KEY is missing in Railway.")
             return
 
-        # ✅ Use Chat Completions (stable, works everywhere)
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant in Slack."},
-                {"role": "user", "content": f"Summarize this briefly: {text}"}
-            ]
-        )
-        answer = response.choices[0].message.content
-        say(answer)
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant in Slack. Reply briefly."},
+                    {"role": "user", "content": text}
+                ]
+            )
+            answer = response.choices[0].message.content
+            say(answer)
+
+        except Exception as e:
+            say(f"OpenAI error: {str(e)}")
 
     @slack_app.event("file_shared")
     def handle_file_shared(body, client, say):
         file_id = body["event"]["file_id"]
         file_info = client.files_info(file=file_id)
         file_name = file_info["file"]["name"]
-
-        if not openai_client:
-            say(f"Got your file: *{file_name}* — but OPENAI_API_KEY is missing in Railway.")
-            return
-
         say(f"Got your file: *{file_name}*. AI processing coming soon!")
 
 @api.get("/")
 def root():
-    env_keys = sorted([k for k in os.environ.keys() if "OPENAI" in k or "SLACK" in k])
     return {
         "ok": True,
-        "env_keys": env_keys,
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
         "has_openai_key": bool(OPENAI_API_KEY),
-        "openai_key_prefix": OPENAI_API_KEY[:7] if OPENAI_API_KEY else None,
     }
 
 @api.post("/slack/events")
