@@ -57,6 +57,7 @@ def root():
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
         "has_openai_key": bool(OPENAI_API_KEY),
+        "openai_key_prefix": OPENAI_API_KEY[:7] if OPENAI_API_KEY else None,
     }
 
 @api.post("/slack/events")
