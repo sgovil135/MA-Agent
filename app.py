@@ -55,8 +55,10 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
 
 @api.get("/")
 def root():
+    env_keys = sorted([k for k in os.environ.keys() if "OPENAI" in k or "SLACK" in k])
     return {
         "ok": True,
+        "env_keys": env_keys,
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
         "has_openai_key": bool(OPENAI_API_KEY),
