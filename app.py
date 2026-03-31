@@ -1,4 +1,5 @@
 import os
+import re
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
@@ -8,12 +9,15 @@ api = FastAPI()
 
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OAI_KEY = os.getenv("OAI_KEY")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+openai_client = OpenAI(api_key=OAI_KEY) if OAI_KEY else None
 
 slack_app = None
 handler = None
+
+def clean_mention_text(text: str) -> str:
+    return re.sub(r"<@[^>]+>\s*", "", text).strip()
 
 if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
     slack_app = App(
@@ -24,31 +28,32 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
 
     @slack_app.event("app_mention")
     def handle_mention(body, say):
-        text = body["event"]["text"]
+        raw_text = body["event"].get("text", "")
+        text = clean_mention_text(raw_text)
 
         if openai_client is None:
-            say("OPENAI_API_KEY is missing in Railway.")
+            say("OAI_KEY is missing in Railway.")
             return
 
-        response = openai_client.responses.create(
-            model="gpt-4.1-mini",
-            input=f"Summarize this briefly: {text}"
-        )
-
-        answer = response.output_text
-        say(answer)
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": "Reply briefly and clearly."},
+                    {"role": "user", "content": text}
+                ]
+            )
+            answer = response.choices[0].message.content
+            say(answer)
+        except Exception as e:
+            say(f"OpenAI error: {str(e)}")
 
     @slack_app.event("file_shared")
     def handle_file_shared(body, client, say):
         file_id = body["event"]["file_id"]
         file_info = client.files_info(file=file_id)
         file_name = file_info["file"]["name"]
-
-        if openai_client is None:
-            say(f"Got your file: {file_name}. But OPENAI_API_KEY is missing in Railway.")
-            return
-
-        say(f"Got your file: {file_name}. AI processing comes next.")
+        say(f"Got your file: {file_name}")
 
 @api.get("/")
 def root():
@@ -56,8 +61,7 @@ def root():
         "ok": True,
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
-        "has_openai_key": bool(OPENAI_API_KEY),
-        "openai_key_prefix": OPENAI_API_KEY[:7] if OPENAI_API_KEY else None,
+        "has_oai_key": bool(OAI_KEY),
     }
 
 @api.post("/slack/events")
