@@ -47,8 +47,15 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
     def handle_file_shared(body, client, say):
         file_id = body["event"]["file_id"]
         file_info = client.files_info(file=file_id)
-        file_name = file_info["file"]["name"]
-        say(f"Got your file: *{file_name}*. AI processing coming soon!")
+        file = file_info["file"]
+        file_name = file["name"]
+        mimetype = file.get("mimetype", "")
+
+        if mimetype != "application/pdf":
+            say(f"Got your file: *{file_name}*. Right now I only handle PDFs.")
+            return
+
+        say(f"Got your PDF: *{file_name}*. Analysis wiring is next.")
 
 @api.get("/")
 def root():
