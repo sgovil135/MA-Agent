@@ -7,6 +7,7 @@ api = FastAPI()
 
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+HELLO_TEST = os.getenv("HELLO_TEST")
 
 slack_app = None
 handler = None
@@ -29,6 +30,8 @@ def root():
         "ok": True,
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
+        "hello_test": HELLO_TEST,
+        "env_keys_sample": sorted([k for k in os.environ.keys() if "SLACK" in k or "HELLO" in k or "RAILWAY" in k])[:20]
     }
 
 @api.post("/slack/events")
