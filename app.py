@@ -7,7 +7,6 @@ api = FastAPI()
 
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
-HELLO_TEST = os.getenv("HELLO_TEST")
 
 slack_app = None
 handler = None
@@ -24,14 +23,27 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
         text = body["event"]["text"]
         say(f"I got your message: {text}")
 
+    @slack_app.event("message")
+    def handle_message_events(body, say, logger):
+        event = body.get("event", {})
+
+        # ignore bot messages
+        if event.get("subtype") == "bot_message":
+            return
+
+        files = event.get("files", [])
+        if not files:
+            return
+
+        file_names = [f.get("name", "unknown_file") for f in files]
+        say(f"Got your file(s): {', '.join(file_names)}")
+
 @api.get("/")
 def root():
     return {
         "ok": True,
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
-        "hello_test": HELLO_TEST,
-        "env_keys_sample": sorted([k for k in os.environ.keys() if "SLACK" in k or "HELLO" in k or "RAILWAY" in k])[:20]
     }
 
 @api.post("/slack/events")
