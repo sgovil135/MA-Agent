@@ -8,7 +8,7 @@ api = FastAPI()
 
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
-OPENAI_API_KEY = "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"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
