@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+import base64
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
