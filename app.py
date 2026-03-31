@@ -1,5 +1,6 @@
 import os
 import re
+import requests
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
@@ -37,25 +38,76 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                     {"role": "user", "content": text}
                 ]
             )
-            answer = response.choices[0].message.content
-            say(answer)
-
+            say(response.choices[0].message.content)
         except Exception as e:
             say(f"OpenAI error: {str(e)}")
 
     @slack_app.event("file_shared")
     def handle_file_shared(body, client, say):
         file_id = body["event"]["file_id"]
-        file_info = client.files_info(file=file_id)
-        file = file_info["file"]
-        file_name = file["name"]
-        mimetype = file.get("mimetype", "")
 
-        if mimetype != "application/pdf":
-            say(f"Got your file: *{file_name}*. Right now I only handle PDFs.")
+        if not openai_client:
+            say("OPENAI_API_KEY is missing in Railway.")
             return
 
-        say(f"Got your PDF: *{file_name}*. Analysis wiring is next.")
+        try:
+            file_info = client.files_info(file=file_id)
+            file_obj = file_info["file"]
+            file_name = file_obj["name"]
+            mimetype = file_obj.get("mimetype", "")
+            file_url = file_obj.get("url_private")
+
+            if mimetype != "application/pdf":
+                say(f"Got your file: *{file_name}*. Right now I only handle PDFs.")
+                return
+
+            if not file_url:
+                say(f"Could not access private URL for *{file_name}*.")
+                return
+
+            say(f"Reading *{file_name}*...")
+
+            download_resp = requests.get(
+                file_url,
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                timeout=60,
+            )
+            download_resp.raise_for_status()
+            pdf_bytes = download_resp.content
+
+            response = openai_client.responses.create(
+                model="gpt-4.1-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_file",
+                                "filename": file_name,
+                                "file_data": pdf_bytes,
+                            },
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Analyze this CIM and return:\n"
+                                    "1. What the business actually does in 2 sentences\n"
+                                    "2. Revenue and EBITDA for the last 3 years if available\n"
+                                    "3. Top 3 positives\n"
+                                    "4. Top 3 negatives\n"
+                                    "5. Biggest red flag\n"
+                                    "6. 5 diligence questions\n"
+                                    "Be concise and skeptical."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+
+            say(response.output_text)
+
+        except Exception as e:
+            say(f"PDF analysis error: {str(e)}")
 
 @api.get("/")
 def root():
