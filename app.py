@@ -23,20 +23,14 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
         text = body["event"]["text"]
         say(f"I got your message: {text}")
 
-    @slack_app.event("message")
-    def handle_message_events(body, say, logger):
-        event = body.get("event", {})
+    @slack_app.event("file_shared")
+    def handle_file_shared(body, client, say):
+        file_id = body["event"]["file_id"]
 
-        # ignore bot messages
-        if event.get("subtype") == "bot_message":
-            return
+        file_info = client.files_info(file=file_id)
+        file_name = file_info["file"]["name"]
 
-        files = event.get("files", [])
-        if not files:
-            return
-
-        file_names = [f.get("name", "unknown_file") for f in files]
-        say(f"Got your file(s): {', '.join(file_names)}")
+        say(f"Got your file: {file_name}")
 
 @api.get("/")
 def root():
