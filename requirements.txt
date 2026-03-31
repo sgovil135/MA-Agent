@@ -1,3 +1,4 @@
 slack_bolt
 fastapi
 uvicorn
+openai
