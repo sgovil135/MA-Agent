@@ -43,71 +43,72 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
             say(f"OpenAI error: {str(e)}")
 
     @slack_app.event("file_shared")
-    def handle_file_shared(body, client, say):
-        file_id = body["event"]["file_id"]
+def handle_file_shared(body, client, say):
+    file_id = body["event"]["file_id"]
 
-        if not openai_client:
-            say("OPENAI_API_KEY is missing in Railway.")
+    if not openai_client:
+        say("OPENAI_API_KEY is missing in Railway.")
+        return
+
+    try:
+        file_info = client.files_info(file=file_id)
+        file_obj = file_info["file"]
+        file_name = file_obj["name"]
+        mimetype = file_obj.get("mimetype", "")
+        file_url = file_obj.get("url_private")
+
+        if mimetype != "application/pdf":
+            say(f"Got your file: *{file_name}*. Right now I only handle PDFs.")
             return
 
-        try:
-            file_info = client.files_info(file=file_id)
-            file_obj = file_info["file"]
-            file_name = file_obj["name"]
-            mimetype = file_obj.get("mimetype", "")
-            file_url = file_obj.get("url_private")
+        if not file_url:
+            say(f"Could not access private URL for *{file_name}*.")
+            return
 
-            if mimetype != "application/pdf":
-                say(f"Got your file: *{file_name}*. Right now I only handle PDFs.")
-                return
+        say(f"Reading *{file_name}*...")
 
-            if not file_url:
-                say(f"Could not access private URL for *{file_name}*.")
-                return
+        download_resp = requests.get(
+            file_url,
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            timeout=60,
+        )
+        download_resp.raise_for_status()
+        pdf_bytes = download_resp.content
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
-            say(f"Reading *{file_name}*...")
+        response = openai_client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "filename": file_name,
+                            "file_data": pdf_b64,
+                        },
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Analyze this CIM and return:\n"
+                                "1. What the business actually does in 2 sentences\n"
+                                "2. Revenue and EBITDA for the last 3 years if available\n"
+                                "3. Top 3 positives\n"
+                                "4. Top 3 negatives\n"
+                                "5. Biggest red flag\n"
+                                "6. 5 diligence questions\n"
+                                "Be concise and skeptical."
+                            ),
+                        },
+                    ],
+                }
+            ],
+        )
 
-            download_resp = requests.get(
-                file_url,
-                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-                timeout=60,
-            )
-            download_resp.raise_for_status()
-            pdf_bytes = download_resp.content
+        say(response.output_text)
 
-            response = openai_client.responses.create(
-                model="gpt-4.1-mini",
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_file",
-                                "filename": file_name,
-                                "file_data": pdf_bytes,
-                            },
-                            {
-                                "type": "input_text",
-                                "text": (
-                                    "Analyze this CIM and return:\n"
-                                    "1. What the business actually does in 2 sentences\n"
-                                    "2. Revenue and EBITDA for the last 3 years if available\n"
-                                    "3. Top 3 positives\n"
-                                    "4. Top 3 negatives\n"
-                                    "5. Biggest red flag\n"
-                                    "6. 5 diligence questions\n"
-                                    "Be concise and skeptical."
-                                ),
-                            },
-                        ],
-                    }
-                ],
-            )
-
-            say(response.output_text)
-
-        except Exception as e:
-            say(f"PDF analysis error: {str(e)}")
+    except Exception as e:
+        say(f"PDF analysis error: {str(e)}")
 
 @api.get("/")
 def root():
