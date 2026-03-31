@@ -1,4 +1,3 @@
+slack_bolt
 fastapi
 uvicorn
-python-multipart
-pydantic
