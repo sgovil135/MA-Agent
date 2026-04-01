@@ -33,14 +33,32 @@ pending_deals = {}
 
 def get_graph_token():
     url = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
-    resp = requests.post(url, data={
+    payload = {
+        "grant_type": "client_credentials",
         "client_id": MICROSOFT_CLIENT_ID,
         "client_secret": MICROSOFT_CLIENT_SECRET,
         "scope": "https://graph.microsoft.com/.default",
-        "grant_type": "client_credentials",
-    }, timeout=30)
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    }
+    print(f"[GRAPH AUTH] POST {url}")
+    print(f"[GRAPH AUTH] client_id={MICROSOFT_CLIENT_ID}")
+    print(f"[GRAPH AUTH] tenant_id={MICROSOFT_TENANT_ID}")
+    print(f"[GRAPH AUTH] client_secret={'SET (' + str(len(MICROSOFT_CLIENT_SECRET or '')) + ' chars)' if MICROSOFT_CLIENT_SECRET else 'MISSING'}")
+    print(f"[GRAPH AUTH] scope=https://graph.microsoft.com/.default")
+
+    resp = requests.post(url, data=payload, timeout=30)
+    body = resp.json()
+
+    if resp.status_code != 200:
+        print(f"[GRAPH AUTH] FAILED {resp.status_code}: {body}")
+        resp.raise_for_status()
+
+    token = body.get("access_token", "")
+    if not token:
+        print(f"[GRAPH AUTH] Token response has no access_token. Full response: {body}")
+        raise ValueError("Token response missing access_token")
+
+    print(f"[GRAPH AUTH] Token acquired ({len(token)} chars, starts with {token[:20]}...)")
+    return token
 
 
 def graph_headers():
