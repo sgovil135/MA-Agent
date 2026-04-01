@@ -3,3 +3,5 @@ fastapi
 uvicorn
 openai
 requests
+python-docx
+openpyxl
