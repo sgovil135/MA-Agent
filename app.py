@@ -1,6 +1,6 @@
+import io
 import os
 import re
-import base64
 import requests
 from fastapi import FastAPI, Request
 from slack_bolt import App
@@ -56,10 +56,12 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
 
     @slack_app.event("file_shared")
     def handle_file_shared(body, client, say):
-        file_id = body["event"]["file_id"]
+        event = body["event"]
+        file_id = event["file_id"]
+        channel = event.get("channel_id")
 
         if not openai_client:
-            say("OPENAI_API_KEY is missing in Railway.")
+            say(text="OPENAI_API_KEY is missing in Railway.", channel=channel)
             return
 
         try:
@@ -70,14 +72,14 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
             file_url = file_obj.get("url_private")
 
             if mimetype != "application/pdf":
-                say(f"Got your file: *{file_name}*. Right now I only handle PDFs.")
+                say(text=f"Got your file: *{file_name}*. Right now I only handle PDFs.", channel=channel)
                 return
 
             if not file_url:
-                say(f"Could not access private URL for *{file_name}*.")
+                say(text=f"Could not access private URL for *{file_name}*.", channel=channel)
                 return
 
-            say(f"Reading *{file_name}*...")
+            say(text=f"Reading *{file_name}*...", channel=channel)
 
             download_resp = requests.get(
                 file_url,
@@ -87,7 +89,11 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
             download_resp.raise_for_status()
 
             pdf_bytes = download_resp.content
-            pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+            uploaded_file = openai_client.files.create(
+                file=(file_name, io.BytesIO(pdf_bytes), "application/pdf"),
+                purpose="user_data",
+            )
 
             response = openai_client.responses.create(
                 model="gpt-4.1-mini",
@@ -97,8 +103,7 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                         "content": [
                             {
                                 "type": "input_file",
-                                "filename": file_name,
-                                "file_data": pdf_b64,
+                                "file_id": uploaded_file.id,
                             },
                             {
                                 "type": "input_text",
@@ -118,10 +123,10 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                 ],
             )
 
-            say(response.output_text)
+            say(text=response.output_text, channel=channel)
 
         except Exception as e:
-            say(f"PDF analysis error: {str(e)}")
+            say(text=f"PDF analysis error: {str(e)}", channel=channel)
 
 
 @api.get("/")
