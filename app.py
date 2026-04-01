@@ -381,9 +381,37 @@ def handle_duplicate_response(deal, user_reply, say, channel):
     existing = deal.get("_duplicate", {})
 
     try:
-        if "duplicate" in reply_lower:
+        if "skip" in reply_lower or "duplicate" in reply_lower:
             say(text="Got it — skipping the save. Scorecard is still above for reference.", channel=channel)
             return None  # Done, no follow-up needed
+
+        elif "overwrite" in reply_lower:
+            # Delete the old file and save fresh
+            old_path = f"{existing['folder']}/{existing['name']}"
+            try:
+                headers = graph_headers()
+                url = f"{_drive_url()}/root:/{old_path}"
+                r = requests.get(url, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    item_id = r.json()["id"]
+                    requests.delete(f"{_drive_url()}/items/{item_id}", headers=headers, timeout=15)
+            except Exception as e:
+                say(text=f"Could not delete old memo: {str(e)}", channel=channel)
+
+            doc_bytes = build_deal_memo_docx(deal)
+            doc_name = f"{company} — Deal Memo.docx"
+            result = upload_file("Deal Flow/Pipeline", doc_name, doc_bytes,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            memo_link = result.get("webUrl", "")
+            append_excel_row({
+                "Company": company, "Date": date, "Sector": deal.get("sector", ""),
+                "Source": "", "Revenue (LTM)": deal.get("revenue_ltm", ""),
+                "EBITDA (LTM)": deal.get("ebitda_ltm", ""), "Score": deal.get("score", ""),
+                "Verdict": deal.get("verdict", ""), "Decision": "Pipeline",
+                "Saagar's Take": "", "Memo Link": memo_link,
+            })
+            say(text=f"Overwrote old memo. Saved: `Deal Flow/Pipeline/{doc_name}`", channel=channel)
+            return "ask_source"
 
         elif "updated" in reply_lower or "update" in reply_lower:
             doc_name = f"{company} — Deal Memo (Updated {date}).docx"
@@ -445,7 +473,7 @@ def handle_duplicate_response(deal, user_reply, say, channel):
             return "ask_source"
 
         else:
-            say(text="Didn't catch that — reply *duplicate*, *updated CIM*, or *new version*.", channel=channel)
+            say(text="Didn't catch that — reply *overwrite*, *new version*, or *skip*.", channel=channel)
             return "duplicate_pending"
 
     except Exception as e:
@@ -663,12 +691,13 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
         file_id = event["file_id"]
         channel = event.get("channel_id")
         user_id = event.get("user_id", "")
-
-        if not openai_client:
-            say(text="OPENAI_API_KEY is missing in Railway.", channel=channel)
-            return
+        file_name = "(unknown file)"
 
         try:
+            if not openai_client:
+                say(text="OPENAI_API_KEY is missing in Railway.", channel=channel)
+                return
+
             file_info = client.files_info(file=file_id)
             file_obj = file_info["file"]
             file_name = file_obj["name"]
@@ -724,14 +753,19 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                 say(text="(SharePoint not configured — scorecard not saved.)", channel=channel)
                 return
 
-            result = save_deal_to_sharepoint(deal, say, channel)
+            # Try saving — wrap separately so scorecard is never lost
+            try:
+                result = save_deal_to_sharepoint(deal, say, channel)
+            except Exception as sp_err:
+                print(f"[SHAREPOINT ERROR] {sp_err}")
+                say(text=f"SharePoint save failed: {str(sp_err)}\n(Scorecard is still above — nothing lost.)", channel=channel)
+                return
 
             if result == "duplicate_found":
-                dup = deal["_duplicate"]
+                dup = deal.get("_duplicate", {})
                 say(text=(
-                    f"*Heads up — I already have a deal memo for {deal['company_name']} "
-                    f"from {dup['created'][:10]}.*\n"
-                    "What is this — a *duplicate*, an *updated CIM*, or a *new version*?"
+                    f"*Heads up — I already have a deal memo for {deal['company_name']}.*\n"
+                    "Want me to *overwrite* it, add a *new version*, or *skip* saving?"
                 ), channel=channel)
                 pending_deals[(channel, user_id)] = {
                     "state": "duplicate_pending",
@@ -748,9 +782,15 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                     "state": "ask_source",
                     "deal": deal,
                 }
+                return
+
+            if result == "error":
+                # save_deal_to_sharepoint already posted the error to Slack
+                return
 
         except Exception as e:
-            say(text=f"PDF analysis error: {str(e)}", channel=channel)
+            print(f"[FILE_SHARED ERROR] {e}")
+            say(text=f"*Something went wrong processing {file_name} — here's the error: {str(e)}*", channel=channel)
 
     @slack_app.event("message")
     def handle_message(body, say):
@@ -767,72 +807,80 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
         if not text:
             return
 
-        # Check for folder move commands
-        text_lower = text.lower()
-        if any(phrase in text_lower for phrase in ["pass", "moving on", "passing"]):
-            # Check if there's a recent deal for this user
-            if key in pending_deals and pending_deals[key].get("deal"):
-                deal = pending_deals[key]["deal"]
-                company = deal["company_name"]
-                folder = deal.get("_folder", "Deal Flow/Pipeline")
-                doc_name = deal.get("_doc_name", f"{company} — Deal Memo.docx")
-                old_path = f"{folder}/{doc_name}"
-                if move_file(old_path, "Deal Flow/Passed", doc_name):
-                    update_excel_row(company, "Decision", "Passed")
-                    say(text=f"Moved *{company}* to `Deal Flow/Passed/`.", channel=channel)
-                del pending_deals[key]
+        try:
+            # Check for folder move commands
+            text_lower = text.lower()
+            if any(phrase in text_lower for phrase in ["pass", "moving on", "passing"]):
+                if key in pending_deals and pending_deals[key].get("deal"):
+                    deal = pending_deals[key]["deal"]
+                    company = deal["company_name"]
+                    folder = deal.get("_folder", "Deal Flow/Pipeline")
+                    doc_name = deal.get("_doc_name", f"{company} — Deal Memo.docx")
+                    old_path = f"{folder}/{doc_name}"
+                    if move_file(old_path, "Deal Flow/Passed", doc_name):
+                        update_excel_row(company, "Decision", "Passed")
+                        say(text=f"Moved *{company}* to `Deal Flow/Passed/`.", channel=channel)
+                    del pending_deals[key]
+                    return
+
+            if any(phrase in text_lower for phrase in ["active", "exploring"]):
+                if key in pending_deals and pending_deals[key].get("deal"):
+                    deal = pending_deals[key]["deal"]
+                    company = deal["company_name"]
+                    folder = deal.get("_folder", "Deal Flow/Pipeline")
+                    doc_name = deal.get("_doc_name", f"{company} — Deal Memo.docx")
+                    old_path = f"{folder}/{doc_name}"
+                    if move_file(old_path, "Deal Flow/Active", doc_name):
+                        update_excel_row(company, "Decision", "Active")
+                        say(text=f"Moved *{company}* to `Deal Flow/Active/`.", channel=channel)
+                    return
+
+            # Handle pending conversation states
+            if key not in pending_deals:
                 return
 
-        if any(phrase in text_lower for phrase in ["active", "exploring"]):
-            if key in pending_deals and pending_deals[key].get("deal"):
-                deal = pending_deals[key]["deal"]
-                company = deal["company_name"]
-                folder = deal.get("_folder", "Deal Flow/Pipeline")
-                doc_name = deal.get("_doc_name", f"{company} — Deal Memo.docx")
-                old_path = f"{folder}/{doc_name}"
-                if move_file(old_path, "Deal Flow/Active", doc_name):
-                    update_excel_row(company, "Decision", "Active")
-                    say(text=f"Moved *{company}* to `Deal Flow/Active/`.", channel=channel)
-                return
+            state = pending_deals[key]["state"]
+            deal = pending_deals[key]["deal"]
 
-        # Handle pending conversation states
-        if key not in pending_deals:
-            return
+            if state == "duplicate_pending":
+                next_state = handle_duplicate_response(deal, text, say, channel)
+                if next_state == "ask_source":
+                    say(text=(
+                        "*One quick question* — where did this deal come from? "
+                        "(broker name, direct, referral, etc.)"
+                    ), channel=channel)
+                    pending_deals[key]["state"] = "ask_source"
+                elif next_state == "duplicate_pending":
+                    pass  # Stay in this state, user needs to reply again
+                else:
+                    del pending_deals[key]
 
-        state = pending_deals[key]["state"]
-        deal = pending_deals[key]["deal"]
+            elif state == "ask_source":
+                deal["source"] = text
+                try:
+                    update_word_doc_field(deal, "source", text)
+                    update_excel_row(deal["company_name"], "Source", text)
+                except Exception as e:
+                    say(text=f"Saved your answer but SharePoint update failed: {str(e)}", channel=channel)
+                say(text="*What's your take?* Reply with your reaction and I'll save it to the deal memo.", channel=channel)
+                pending_deals[key]["state"] = "ask_reaction"
 
-        if state == "duplicate_pending":
-            next_state = handle_duplicate_response(deal, text, say, channel)
-            if next_state == "ask_source":
-                say(text=(
-                    "*One quick question* — where did this deal come from? "
-                    "(broker name, direct, referral, etc.)"
-                ), channel=channel)
-                pending_deals[key]["state"] = "ask_source"
-            elif next_state == "duplicate_pending":
-                pass  # Stay in this state, user needs to reply again
-            else:
-                del pending_deals[key]
+            elif state == "ask_reaction":
+                deal["reaction"] = text
+                try:
+                    update_word_doc_field(deal, "reaction", text)
+                    update_excel_row(deal["company_name"], "Saagar's Take", text)
+                except Exception as e:
+                    say(text=f"Saved your answer but SharePoint update failed: {str(e)}", channel=channel)
+                say(text=f"Saved. *{deal['company_name']}* is in the pipeline. Say *pass* or *active* anytime to move it.", channel=channel)
+                pending_deals[key]["state"] = "done"
 
-        elif state == "ask_source":
-            deal["source"] = text
-            update_word_doc_field(deal, "source", text)
-            update_excel_row(deal["company_name"], "Source", text)
-            say(text="*What's your take?* Reply with your reaction and I'll save it to the deal memo.", channel=channel)
-            pending_deals[key]["state"] = "ask_reaction"
+            elif state == "done":
+                pass
 
-        elif state == "ask_reaction":
-            deal["reaction"] = text
-            update_word_doc_field(deal, "reaction", text)
-            update_excel_row(deal["company_name"], "Saagar's Take", text)
-            say(text=f"Saved. *{deal['company_name']}* is in the pipeline. Say *pass* or *active* anytime to move it.", channel=channel)
-            # Keep the deal in state so folder moves still work
-            pending_deals[key]["state"] = "done"
-
-        elif state == "done":
-            # Already done — only folder move commands apply (handled above)
-            pass
+        except Exception as e:
+            print(f"[MESSAGE ERROR] {e}")
+            say(text=f"*Something went wrong — here's the error: {str(e)}*", channel=channel)
 
 
 @api.get("/")
