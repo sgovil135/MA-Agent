@@ -95,6 +95,41 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                 purpose="user_data",
             )
 
+            cim_prompt = (
+                "You are an M&A analyst scoring a Confidential Information Memorandum (CIM).\n\n"
+                "SCORING RULES:\n"
+                "- Scores must be 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, or 5 only. No other values.\n\n"
+                "SCORE THESE 5 CATEGORIES:\n"
+                "1. Autonomy — does real management exist without the seller?\n"
+                "2. Cash Flow Quality — are margins durable and healthy?\n"
+                "3. Growth Reality — is the growth path clear and practical?\n"
+                "4. Downside Risk — how fragile is the revenue base?\n"
+                "5. Strategic Fit — does this fit a multi-division industrial/defense platform?\n\n"
+                "VERDICT:\n"
+                "- 18+ → \"Go for it\"\n"
+                "- 15–17 → \"Proceed Conservatively\"\n"
+                "- Under 15 → \"Pass\"\n\n"
+                "FORMAT THE RESPONSE EXACTLY LIKE THIS:\n\n"
+                "**[Company Name] — Deal Scorecard**\n\n"
+                "**Business:** 2-3 sentence description. Industry, model, customer type, why it exists.\n\n"
+                "**Financials:**\n"
+                "- Revenue: [Y1] / [Y2] / [Y3]\n"
+                "- EBITDA: [Y1] / [Y2] / [Y3]\n\n"
+                "**Scores:**\n"
+                "- Autonomy: X/5 — [one sentence]\n"
+                "- Cash Flow Quality: X/5 — [one sentence]\n"
+                "- Growth Reality: X/5 — [one sentence]\n"
+                "- Downside Risk: X/5 — [one sentence]\n"
+                "- Strategic Fit: X/5 — [one sentence]\n"
+                "- **Total: X/25 — [Verdict]**\n\n"
+                "**Valuation Range:** $XM – $XM (based on X–Xx EBITDA)\n\n"
+                "**Open Questions:**\n"
+                "1. \n"
+                "2. \n"
+                "3. \n\n"
+                "Keep it under 400 words. No fluff. If data is missing, say so and flag it as a risk."
+            )
+
             response = openai_client.responses.create(
                 model="gpt-4.1-mini",
                 input=[
@@ -107,16 +142,7 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                             },
                             {
                                 "type": "input_text",
-                                "text": (
-                                    "Analyze this CIM and return:\n"
-                                    "1. What the business actually does in 2 sentences\n"
-                                    "2. Revenue and EBITDA for the last 3 years if available\n"
-                                    "3. Top 3 positives\n"
-                                    "4. Top 3 negatives\n"
-                                    "5. Biggest red flag\n"
-                                    "6. 5 diligence questions\n"
-                                    "Be concise and skeptical."
-                                ),
+                                "text": cim_prompt,
                             },
                         ],
                     }
