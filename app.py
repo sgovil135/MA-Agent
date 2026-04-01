@@ -29,6 +29,10 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # Key: (channel_id, user_id) → deal context dict
 pending_deals = {}
 
+# Key: (channel_id, user_id) → {"file_id": str, "scorecard": str, "company": str}
+# Persists CIM context for follow-up Q&A until new CIM or "done"
+active_cim_sessions = {}
+
 # ── Microsoft Graph helpers ─────────────────────────────────────────────
 
 def get_graph_token():
@@ -744,8 +748,17 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
             scorecard_text = response.output_text
             say(text=scorecard_text, channel=channel)
 
+            # Store CIM session for follow-up Q&A
+            active_cim_sessions[(channel, user_id)] = {
+                "file_id": uploaded_file.id,
+                "scorecard": scorecard_text,
+                "company": "",  # will be set after parsing
+                "history": [],  # conversation history for follow-ups
+            }
+
             # Parse scorecard and save to SharePoint
             deal = parse_scorecard(scorecard_text)
+            active_cim_sessions[(channel, user_id)]["company"] = deal["company_name"]
 
             has_sharepoint = all([MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET,
                                   MICROSOFT_TENANT_ID, SHAREPOINT_SITE_ID])
@@ -835,48 +848,111 @@ if SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET:
                         say(text=f"Moved *{company}* to `Deal Flow/Active/`.", channel=channel)
                     return
 
-            # Handle pending conversation states
-            if key not in pending_deals:
+            # "done" ends CIM Q&A session
+            if text_lower == "done" and key in active_cim_sessions:
+                company = active_cim_sessions[key].get("company", "the CIM")
+                del active_cim_sessions[key]
+                if key in pending_deals:
+                    del pending_deals[key]
+                say(text=f"Closed the *{company}* session. Upload a new CIM whenever you're ready.", channel=channel)
                 return
 
-            state = pending_deals[key]["state"]
-            deal = pending_deals[key]["deal"]
+            # Handle pending conversation states (source/reaction/duplicate flow)
+            if key in pending_deals:
+                state = pending_deals[key]["state"]
+                deal = pending_deals[key]["deal"]
 
-            if state == "duplicate_pending":
-                next_state = handle_duplicate_response(deal, text, say, channel)
-                if next_state == "ask_source":
-                    say(text=(
-                        "*One quick question* — where did this deal come from? "
-                        "(broker name, direct, referral, etc.)"
-                    ), channel=channel)
-                    pending_deals[key]["state"] = "ask_source"
-                elif next_state == "duplicate_pending":
-                    pass  # Stay in this state, user needs to reply again
-                else:
-                    del pending_deals[key]
+                if state == "duplicate_pending":
+                    next_state = handle_duplicate_response(deal, text, say, channel)
+                    if next_state == "ask_source":
+                        say(text=(
+                            "*One quick question* — where did this deal come from? "
+                            "(broker name, direct, referral, etc.)"
+                        ), channel=channel)
+                        pending_deals[key]["state"] = "ask_source"
+                    elif next_state == "duplicate_pending":
+                        pass
+                    else:
+                        del pending_deals[key]
+                    return
 
-            elif state == "ask_source":
-                deal["source"] = text
-                try:
-                    update_word_doc_field(deal, "source", text)
-                    update_excel_row(deal["company_name"], "Source", text)
-                except Exception as e:
-                    say(text=f"Saved your answer but SharePoint update failed: {str(e)}", channel=channel)
-                say(text="*What's your take?* Reply with your reaction and I'll save it to the deal memo.", channel=channel)
-                pending_deals[key]["state"] = "ask_reaction"
+                elif state == "ask_source":
+                    deal["source"] = text
+                    try:
+                        update_word_doc_field(deal, "source", text)
+                        update_excel_row(deal["company_name"], "Source", text)
+                    except Exception as e:
+                        say(text=f"Saved your answer but SharePoint update failed: {str(e)}", channel=channel)
+                    say(text="*What's your take?* Reply with your reaction and I'll save it to the deal memo.", channel=channel)
+                    pending_deals[key]["state"] = "ask_reaction"
+                    return
 
-            elif state == "ask_reaction":
-                deal["reaction"] = text
-                try:
-                    update_word_doc_field(deal, "reaction", text)
-                    update_excel_row(deal["company_name"], "Saagar's Take", text)
-                except Exception as e:
-                    say(text=f"Saved your answer but SharePoint update failed: {str(e)}", channel=channel)
-                say(text=f"Saved. *{deal['company_name']}* is in the pipeline. Say *pass* or *active* anytime to move it.", channel=channel)
-                pending_deals[key]["state"] = "done"
+                elif state == "ask_reaction":
+                    deal["reaction"] = text
+                    try:
+                        update_word_doc_field(deal, "reaction", text)
+                        update_excel_row(deal["company_name"], "Saagar's Take", text)
+                    except Exception as e:
+                        say(text=f"Saved your answer but SharePoint update failed: {str(e)}", channel=channel)
+                    say(text=f"Saved. *{deal['company_name']}* is in the pipeline. Say *pass* or *active* anytime to move it.", channel=channel)
+                    pending_deals[key]["state"] = "done"
+                    return
 
-            elif state == "done":
-                pass
+                # state == "done" falls through to CIM Q&A below
+
+            # ── CIM follow-up Q&A ──────────────────────────────────────
+            if key in active_cim_sessions and openai_client:
+                session = active_cim_sessions[key]
+                company = session.get("company", "this company")
+
+                # Detect email drafting requests
+                is_email = any(w in text_lower for w in ["draft", "email", "write to", "respond to", "reply to", "reach out"])
+
+                system_msg = (
+                    f"You have access to the full CIM for {company}. "
+                    f"The scorecard produced was:\n\n{session['scorecard']}\n\n"
+                    "Answer follow-up questions about this deal using the CIM content. "
+                    "Be specific, cite numbers from the CIM when possible. "
+                    "Use Slack formatting (*bold* not **bold**)."
+                )
+                if is_email:
+                    system_msg += (
+                        "\n\nThe user wants you to draft an email or message. "
+                        "Write in a direct, no-fluff CEO style appropriate for M&A outreach. "
+                        "Keep it professional but not corporate-speak. Short sentences. "
+                        "Get to the point fast. Sound like a principal, not an advisor."
+                    )
+
+                # Build message history
+                messages = [
+                    {"role": "system", "content": system_msg},
+                ]
+                # Include the CIM file reference
+                input_content = [
+                    {"type": "input_file", "file_id": session["file_id"]},
+                ]
+                # Add conversation history (last 10 exchanges)
+                for prev in session["history"][-10:]:
+                    messages.append(prev)
+                # Add current question
+                messages.append({"role": "user", "content": text})
+
+                # Use responses API so we can include the file
+                response = openai_client.responses.create(
+                    model="gpt-4.1-mini",
+                    input=[
+                        {"role": "user", "content": input_content + [{"type": "input_text", "text": system_msg}]},
+                        *session["history"][-10:],
+                        {"role": "user", "content": [{"type": "input_text", "text": text}]},
+                    ],
+                )
+
+                answer = response.output_text
+                say(text=answer, channel=channel)
+
+                # Save to history
+                session["history"].append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+                session["history"].append({"role": "assistant", "content": [{"type": "output_text", "text": answer}]})
 
         except Exception as e:
             print(f"[MESSAGE ERROR] {e}")
