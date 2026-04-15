@@ -60,20 +60,34 @@ def _call_openai_text(client: OpenAI, prompt: str) -> str:
 
 # ── Slack notification formatters ─────────────────────────────────────────
 
-def _format_slack_go(company: str, total: int, financials: dict,
-                     valuation: dict, folder_link: str) -> str:
-    rev = financials.get("revenue", [None])[-1]
-    ebitda_vals = financials.get("ebitda", [None])
-    ebitda = ebitda_vals[-1] if ebitda_vals else None
+def _safe_last(lst: list | None) -> float | None:
+    """Get last non-None value from a list, or None."""
+    if not lst:
+        return None
+    for val in reversed(lst):
+        if val is not None:
+            return val
+    return None
+
+
+def _format_financials(financials: dict) -> tuple[str, str, str]:
+    """Extract revenue, ebitda, margin strings safely."""
+    rev = _safe_last(financials.get("revenue"))
+    ebitda = _safe_last(financials.get("ebitda"))
+    gp = _safe_last(financials.get("gross_profit"))
     rev_str = f"${rev / 1_000_000:.1f}M" if rev else "N/A"
     ebitda_str = f"${ebitda / 1_000_000:.1f}M" if ebitda else "N/A"
-
-    gp = financials.get("gross_profit", [None])[-1]
     margin_str = f"{gp / rev * 100:.0f}%" if gp and rev and rev > 0 else "N/A"
+    return rev_str, ebitda_str, margin_str
 
-    val_low = valuation.get("low", "?")
-    val_mid = valuation.get("mid", "?")
-    val_high = valuation.get("high", "?")
+
+def _format_slack_go(company: str, total: int, financials: dict,
+                     valuation: dict, folder_link: str) -> str:
+    rev_str, ebitda_str, margin_str = _format_financials(financials)
+
+    val_low = valuation.get("low", "?") if valuation else "?"
+    val_mid = valuation.get("mid", "?") if valuation else "?"
+    val_high = valuation.get("high", "?") if valuation else "?"
 
     return (
         f"🏭 *NEW DEAL: {company}*\n"
@@ -87,18 +101,11 @@ def _format_slack_go(company: str, total: int, financials: dict,
 
 def _format_slack_cautious(company: str, total: int, financials: dict,
                             valuation: dict, folder_link: str) -> str:
-    rev = financials.get("revenue", [None])[-1]
-    ebitda_vals = financials.get("ebitda", [None])
-    ebitda = ebitda_vals[-1] if ebitda_vals else None
-    rev_str = f"${rev / 1_000_000:.1f}M" if rev else "N/A"
-    ebitda_str = f"${ebitda / 1_000_000:.1f}M" if ebitda else "N/A"
+    rev_str, ebitda_str, margin_str = _format_financials(financials)
 
-    gp = financials.get("gross_profit", [None])[-1]
-    margin_str = f"{gp / rev * 100:.0f}%" if gp and rev and rev > 0 else "N/A"
-
-    val_low = valuation.get("low", "?")
-    val_mid = valuation.get("mid", "?")
-    val_high = valuation.get("high", "?")
+    val_low = valuation.get("low", "?") if valuation else "?"
+    val_mid = valuation.get("mid", "?") if valuation else "?"
+    val_high = valuation.get("high", "?") if valuation else "?"
 
     return (
         f"🏭 *NEW DEAL: {company}*\n"
@@ -151,7 +158,14 @@ def run_deal_pipeline(
 
     # ── Step 1: Score the CIM ─────────────────────────────────────────
     score_text = _call_openai_with_pdf(openai_client, file_id, SCORE_CIM_PROMPT)
-    scorecard = json.loads(_clean_json_response(score_text))
+    try:
+        scorecard = json.loads(_clean_json_response(score_text))
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"[PIPELINE] Score parse error: {e}\nRaw: {score_text[:500]}")
+        if slack_say:
+            slack_say(f"⚠️ Could not parse scorecard for *{pdf_name}*. Raw response saved.")
+        scorecard = {"company_name": pdf_name, "total_score": 0, "verdict": "PARSE ERROR",
+                     "scores": {}, "executive_summary": "Failed to parse CIM scoring response."}
     result["scorecard"] = scorecard
 
     company = scorecard.get("company_name", "Unknown Company")
@@ -162,7 +176,11 @@ def run_deal_pipeline(
     result["verdict"] = verdict
 
     # ── Dedup check against existing Dropbox folders ──────────────────
-    dup = dropbox_client.check_duplicate(company, openai_client)
+    try:
+        dup = dropbox_client.check_duplicate(company, openai_client)
+    except Exception as e:
+        print(f"[PIPELINE] Dedup check error: {e}")
+        dup = None
     if dup:
         result["duplicate"] = dup
         match_name = dup.get("match", "")
@@ -181,7 +199,12 @@ def run_deal_pipeline(
 
     # ── Step 1b: Extract financials ───────────────────────────────────
     fin_text = _call_openai_with_pdf(openai_client, file_id, EXTRACT_FINANCIALS_PROMPT)
-    financials = json.loads(_clean_json_response(fin_text))
+    try:
+        financials = json.loads(_clean_json_response(fin_text))
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"[PIPELINE] Financials parse error: {e}\nRaw: {fin_text[:500]}")
+        financials = {"company_name": company, "sector": "mixed",
+                      "periods": [], "revenue": [], "ebitda": [], "gross_profit": []}
     result["financials"] = financials
 
     # ── Score < 15: PASS — Slack only, no files ───────────────────────
@@ -205,48 +228,53 @@ def run_deal_pipeline(
     files_to_upload[f"{company}_Financial_Model.xlsx"] = xlsx_bytes
 
     # ── Step 3: Diligence questions ───────────────────────────────────
-    dq_prompt = DILIGENCE_QUESTIONS_PROMPT.replace(
-        "__SCORECARD_JSON__", json.dumps(scorecard, indent=2)
-    )
-    dq_text = _call_openai_with_pdf(openai_client, file_id, dq_prompt)
-    questions = json.loads(_clean_json_response(dq_text))
-    result["diligence_questions"] = questions
-
-    dq_bytes = build_diligence_doc(company, questions)
-    files_to_upload[f"{company}_Diligence_Questions.docx"] = dq_bytes
+    try:
+        dq_prompt = DILIGENCE_QUESTIONS_PROMPT.replace(
+            "__SCORECARD_JSON__", json.dumps(scorecard, indent=2)
+        )
+        dq_text = _call_openai_with_pdf(openai_client, file_id, dq_prompt)
+        questions = json.loads(_clean_json_response(dq_text))
+        result["diligence_questions"] = questions
+        dq_bytes = build_diligence_doc(company, questions)
+        files_to_upload[f"{company}_Diligence_Questions.docx"] = dq_bytes
+    except Exception as e:
+        print(f"[PIPELINE] Diligence questions error: {e}")
 
     # ── Step 4: LOI draft ─────────────────────────────────────────────
-    loi_var_prompt = LOI_VARIABLES_PROMPT.replace(
-        "__SCORECARD_JSON__", json.dumps(scorecard, indent=2)
-    ).replace(
-        "__FINANCIAL_JSON__", json.dumps(financials, indent=2)
-    )
-    loi_vars_text = _call_openai_with_pdf(openai_client, file_id, loi_var_prompt)
-    loi_vars = json.loads(_clean_json_response(loi_vars_text))
-    result["loi_vars"] = loi_vars
+    try:
+        loi_var_prompt = LOI_VARIABLES_PROMPT.replace(
+            "__SCORECARD_JSON__", json.dumps(scorecard, indent=2)
+        ).replace(
+            "__FINANCIAL_JSON__", json.dumps(financials, indent=2)
+        )
+        loi_vars_text = _call_openai_with_pdf(openai_client, file_id, loi_var_prompt)
+        loi_vars = json.loads(_clean_json_response(loi_vars_text))
+        result["loi_vars"] = loi_vars
 
-    terms = LOITerms(
-        date=loi_vars.get("date", ""),
-        seller_names=loi_vars.get("seller_names", ""),
-        seller_greeting=loi_vars.get("seller_greeting", ""),
-        company_name=loi_vars.get("company_name", company),
-        company_abbreviation=loi_vars.get("company_abbreviation", ""),
-        company_address_lines=loi_vars.get("company_address_lines", []),
-        buyer_name=loi_vars.get("buyer_name", "Cemtrex"),
-        opening_paragraphs=loi_vars.get("opening_paragraphs", []),
-        total_consideration=loi_vars.get("total_consideration", ""),
-        cash_at_close=loi_vars.get("cash_at_close", ""),
-        note_amount=loi_vars.get("note_amount", ""),
-        has_earnout=loi_vars.get("has_earnout", False),
-        earnout_text=loi_vars.get("earnout_text", ""),
-        nwc_floor=loi_vars.get("nwc_floor", "[TO BE DETERMINED DURING DILIGENCE]"),
-        property_text=loi_vars.get("property_text", ""),
-        employees_text=loi_vars.get("employees_text", ""),
-        exclusivity_days=loi_vars.get("exclusivity_days", "sixty (60)"),
-        closing_paragraphs=loi_vars.get("closing_paragraphs", []),
-    )
-    loi_bytes = build_loi(terms)
-    files_to_upload[f"{company}_LOI_Draft.docx"] = loi_bytes
+        terms = LOITerms(
+            date=loi_vars.get("date", ""),
+            seller_names=loi_vars.get("seller_names", ""),
+            seller_greeting=loi_vars.get("seller_greeting", ""),
+            company_name=loi_vars.get("company_name", company),
+            company_abbreviation=loi_vars.get("company_abbreviation", ""),
+            company_address_lines=loi_vars.get("company_address_lines", []),
+            buyer_name=loi_vars.get("buyer_name", "Cemtrex"),
+            opening_paragraphs=loi_vars.get("opening_paragraphs", []),
+            total_consideration=loi_vars.get("total_consideration", ""),
+            cash_at_close=loi_vars.get("cash_at_close", ""),
+            note_amount=loi_vars.get("note_amount", ""),
+            has_earnout=loi_vars.get("has_earnout", False),
+            earnout_text=loi_vars.get("earnout_text", ""),
+            nwc_floor=loi_vars.get("nwc_floor", "[TO BE DETERMINED DURING DILIGENCE]"),
+            property_text=loi_vars.get("property_text", ""),
+            employees_text=loi_vars.get("employees_text", ""),
+            exclusivity_days=loi_vars.get("exclusivity_days", "sixty (60)"),
+            closing_paragraphs=loi_vars.get("closing_paragraphs", []),
+        )
+        loi_bytes = build_loi(terms)
+        files_to_upload[f"{company}_LOI_Draft.docx"] = loi_bytes
+    except Exception as e:
+        print(f"[PIPELINE] LOI generation error: {e}")
 
     # ── Upload to Dropbox ─────────────────────────────────────────────
     paths = dropbox_client.upload_deal_outputs(company, files_to_upload)
