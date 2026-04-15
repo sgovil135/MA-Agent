@@ -281,7 +281,7 @@ def root():
         "has_bot_token": bool(SLACK_BOT_TOKEN),
         "has_signing_secret": bool(SLACK_SIGNING_SECRET),
         "has_openai_key": bool(OPENAI_API_KEY),
-        "has_dropbox": bool(os.getenv("DROPBOX_ACCESS_TOKEN")),
+        "has_dropbox": bool(os.getenv("DROPBOX_REFRESH_TOKEN")),
         "has_graph": all([
             os.getenv("MICROSOFT_CLIENT_ID"),
             os.getenv("MICROSOFT_CLIENT_SECRET"),
