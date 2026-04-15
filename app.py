@@ -291,6 +291,26 @@ def root():
     }
 
 
+@api.get("/debug/env")
+def debug_env():
+    """Show first few chars of env vars for debugging. Remove after fixing."""
+    def mask(name):
+        val = os.getenv(name, "")
+        if not val:
+            return "NOT SET"
+        return f"{val[:5]}... ({len(val)} chars)"
+    return {
+        "MICROSOFT_CLIENT_ID": mask("MICROSOFT_CLIENT_ID"),
+        "MICROSOFT_CLIENT_SECRET": mask("MICROSOFT_CLIENT_SECRET"),
+        "MICROSOFT_TENANT_ID": mask("MICROSOFT_TENANT_ID"),
+        "DROPBOX_REFRESH_TOKEN": mask("DROPBOX_REFRESH_TOKEN"),
+        "DROPBOX_APP_KEY": mask("DROPBOX_APP_KEY"),
+        "DROPBOX_APP_SECRET": mask("DROPBOX_APP_SECRET"),
+        "SLACK_CHANNEL_ID": mask("SLACK_CHANNEL_ID"),
+        "OUTLOOK_USER_EMAIL": mask("OUTLOOK_USER_EMAIL"),
+    }
+
+
 @api.post("/slack/events")
 async def slack_events(req: Request):
     if handler is None:
