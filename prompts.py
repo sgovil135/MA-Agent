@@ -262,17 +262,52 @@ write in paragraph form for each section with section headings in caps.
 # ── Email classifier ──────────────────────────────────────────────────────
 
 CLASSIFY_EMAIL_PROMPT = """\
-You are classifying emails for an M&A dealflow pipeline.
+You are classifying emails for an M&A dealflow pipeline. You must determine \
+BOTH whether this email is deal-related AND what type of deal email it is.
 
-Determine if this email is deal-related (a broker pitch, teaser, CIM delivery, \
-acquisition opportunity, or deal update) or noise (newsletters, marketing, \
-internal comms, unrelated business).
+EXISTING ACTIVE DEALS (deals we are already tracking):
+__ACTIVE_DEALS__
 
 Email subject: __SUBJECT__
 Email sender: __SENDER__
 Email body (first 2000 chars):
 __BODY__
 
-Respond with ONLY JSON with keys "is_deal" (boolean), "confidence" \
-("high"/"medium"/"low"), and "reason" (one sentence). No markdown.
+Attachment filenames (if any):
+__ATTACHMENTS__
+
+CLASSIFY INTO ONE OF THESE CATEGORIES:
+
+1. "new_cim" — This is a NEW deal we have NOT seen before, AND the email \
+contains or attaches what appears to be a CIM, teaser deck, or offering \
+memorandum for a company. This is the ONLY category that triggers full \
+deal analysis. Be strict: the attachment must be a CIM/deck/teaser, \
+not an NDA, backlog report, financial update, or other supplementary doc.
+
+2. "existing_deal_update" — This email is about a deal we are ALREADY \
+tracking (matches one of the active deals listed above). Could be follow-up \
+docs, Q&A, updated financials, backlog reports, NDAs, scheduling, etc. \
+Match by company name, project codename, broker/sender, or context clues.
+
+3. "new_deal_no_cim" — This is a NEW deal pitch or introduction, but there \
+is no CIM or teaser deck attached. Just a pitch email or initial outreach.
+
+4. "noise" — Not deal-related at all. Newsletters, marketing, internal comms, \
+automated alerts, or other non-deal emails.
+
+IMPORTANT RULES:
+- If the sender or subject matches an existing active deal, it is ALWAYS \
+"existing_deal_update", even if they attach a new document.
+- A backlog file, financial report, NDA, Q&A document, or diligence item \
+for a known deal is NOT a new CIM — it is "existing_deal_update".
+- Only classify as "new_cim" if you are confident this is a genuinely new \
+company/deal AND the attachment is a CIM, teaser, or offering memorandum.
+- When in doubt between "new_cim" and "existing_deal_update", choose \
+"existing_deal_update". False negatives are better than false positives.
+
+Respond with ONLY this JSON (no markdown):
+{"category": "new_cim|existing_deal_update|new_deal_no_cim|noise", \
+"matched_deal": "name of matched active deal or null", \
+"confidence": "high|medium|low", \
+"reason": "one sentence"}
 """

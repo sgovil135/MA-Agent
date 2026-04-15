@@ -192,16 +192,51 @@ def find_pdf_attachments(message_id: str) -> list[dict[str, Any]]:
 
 # ── Classify email ────────────────────────────────────────────────────────
 
-def classify_email(openai_client, subject: str, sender: str, body: str) -> dict:
-    """Use OpenAI to classify whether an email is deal-related."""
-    # Truncate body to 2000 chars
+def _get_active_deals() -> list[str]:
+    """Get list of active deal names from Dropbox folders + processed emails."""
+    deals = set()
+
+    # From Dropbox folders
+    try:
+        import dropbox_client
+        folders = dropbox_client.list_deal_folders()
+        deals.update(folders)
+    except Exception as e:
+        print(f"[CLASSIFIER] Could not list Dropbox folders: {e}")
+
+    # From processed emails that were flagged as deals
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT DISTINCT deal_name FROM processed_emails WHERE is_deal = 1 AND deal_name != ''"
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            deals.add(row[0])
+    except Exception:
+        pass
+
+    return sorted(deals)
+
+
+def classify_email(openai_client, subject: str, sender: str, body: str,
+                   attachment_names: list[str] | None = None) -> dict:
+    """Classify an email into: new_cim, existing_deal_update, new_deal_no_cim, noise."""
     body_truncated = body[:2000] if body else ""
+    active_deals = _get_active_deals()
+    deals_str = "\n".join(f"- {d}" for d in active_deals) if active_deals else "(none tracked yet)"
+    attachments_str = "\n".join(f"- {a}" for a in (attachment_names or [])) or "(no attachments)"
+
     prompt = CLASSIFY_EMAIL_PROMPT.replace(
         "__SUBJECT__", subject
     ).replace(
         "__SENDER__", sender
     ).replace(
         "__BODY__", body_truncated
+    ).replace(
+        "__ACTIVE_DEALS__", deals_str
+    ).replace(
+        "__ATTACHMENTS__", attachments_str
     )
 
     response = openai_client.chat.completions.create(
@@ -211,7 +246,6 @@ def classify_email(openai_client, subject: str, sender: str, body: str) -> dict:
     )
     text = response.choices[0].message.content.strip()
 
-    # Strip markdown fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]
     if text.endswith("```"):
@@ -221,7 +255,7 @@ def classify_email(openai_client, subject: str, sender: str, body: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"is_deal": False, "confidence": "low", "reason": "Failed to parse classification"}
+        return {"category": "noise", "confidence": "low", "reason": "Failed to parse classification"}
 
 
 # ── Polling loop ──────────────────────────────────────────────────────────
@@ -232,7 +266,7 @@ def start_polling(openai_client, pipeline_callback, slack_say_callback):
     Args:
         openai_client: OpenAI client instance
         pipeline_callback: function(email_data, pdf_bytes, pdf_name) -> None
-            Called when a deal email with a CIM PDF is found.
+            Called when a NEW deal email with a CIM PDF is found.
         slack_say_callback: function(text) -> None
             Called to send Slack notifications.
     """
@@ -259,47 +293,90 @@ def start_polling(openai_client, pipeline_callback, slack_say_callback):
                     new_count += 1
                     subject = email_data["subject"]
                     sender = email_data["sender_email"]
+                    sender_name = email_data["sender_name"]
                     body = email_data["body_text"]
 
-                    # Classify
-                    classification = classify_email(openai_client, subject, sender, body)
+                    # Get attachment names for classification context
+                    attachment_names = []
+                    if email_data["has_attachments"]:
+                        try:
+                            atts = fetch_attachments(mid)
+                            attachment_names = [a.get("name", "") for a in atts]
+                        except Exception:
+                            pass
 
-                    if not classification.get("is_deal", False):
+                    # Classify with active deal awareness
+                    classification = classify_email(
+                        openai_client, subject, sender, body, attachment_names
+                    )
+                    category = classification.get("category", "noise")
+                    matched_deal = classification.get("matched_deal")
+                    reason = classification.get("reason", "")
+
+                    print(f"[POLLER] {category}: {subject} — {reason}")
+
+                    if category == "noise":
                         mark_email_processed(mid, subject, sender, is_deal=False)
-                        print(f"[POLLER] Skipped non-deal: {subject}")
                         continue
 
-                    # Deal email — check for PDF attachments
-                    pdfs = find_pdf_attachments(mid) if email_data["has_attachments"] else []
-
-                    if pdfs:
-                        # Found CIM — download and run pipeline
-                        pdf = pdfs[0]  # Take the first PDF
-                        if pdf.get("content_bytes"):
-                            import base64
-                            pdf_bytes = base64.b64decode(pdf["content_bytes"])
-                        else:
-                            pdf_bytes = download_attachment(mid, pdf["id"])
-
-                        print(f"[POLLER] Deal + CIM found: {subject} → {pdf['name']}")
-                        try:
-                            pipeline_callback(email_data, pdf_bytes, pdf["name"])
-                            mark_email_processed(mid, subject, sender,
-                                                  is_deal=True, deal_name=subject)
-                        except Exception as e:
-                            print(f"[POLLER] Pipeline error for {subject}: {e}")
-                            slack_say_callback(
-                                f"⚠️ Pipeline error processing *{subject}*: {str(e)}"
-                            )
-                            mark_email_processed(mid, subject, sender, is_deal=True)
-                    else:
-                        # Deal email but no CIM
+                    if category == "existing_deal_update":
+                        # Notify about update to existing deal, don't re-score
+                        deal_name = matched_deal or subject
+                        att_str = ", ".join(attachment_names) if attachment_names else "no attachments"
                         slack_say_callback(
-                            f"📬 New deal email from *{sender}*: *{subject}*. No CIM attached."
+                            f"📎 *Update for {deal_name}*\n"
+                            f"From: {sender_name or sender}\n"
+                            f"Subject: {subject}\n"
+                            f"Attachments: {att_str}"
+                        )
+                        mark_email_processed(mid, subject, sender,
+                                              is_deal=True, deal_name=deal_name)
+                        continue
+
+                    if category == "new_deal_no_cim":
+                        slack_say_callback(
+                            f"📬 New deal email from *{sender_name or sender}*: "
+                            f"*{subject}*. No CIM attached."
                         )
                         mark_email_processed(mid, subject, sender,
                                               is_deal=True, deal_name="")
-                        print(f"[POLLER] Deal without CIM: {subject}")
+                        continue
+
+                    if category == "new_cim":
+                        # New deal with CIM — find and process the PDF
+                        pdfs = find_pdf_attachments(mid) if email_data["has_attachments"] else []
+
+                        if pdfs:
+                            pdf = pdfs[0]
+                            if pdf.get("content_bytes"):
+                                import base64
+                                pdf_bytes = base64.b64decode(pdf["content_bytes"])
+                            else:
+                                pdf_bytes = download_attachment(mid, pdf["id"])
+
+                            print(f"[POLLER] New CIM: {subject} → {pdf['name']}")
+                            try:
+                                pipeline_callback(email_data, pdf_bytes, pdf["name"])
+                                mark_email_processed(mid, subject, sender,
+                                                      is_deal=True, deal_name=subject)
+                            except Exception as e:
+                                print(f"[POLLER] Pipeline error for {subject}: {e}")
+                                slack_say_callback(
+                                    f"⚠️ Pipeline error processing *{subject}*: {str(e)}"
+                                )
+                                mark_email_processed(mid, subject, sender, is_deal=True)
+                        else:
+                            # Classified as new_cim but no PDF found
+                            slack_say_callback(
+                                f"📬 New deal from *{sender_name or sender}*: "
+                                f"*{subject}*. Classified as CIM but no PDF found."
+                            )
+                            mark_email_processed(mid, subject, sender,
+                                                  is_deal=True, deal_name="")
+                        continue
+
+                    # Fallback — unknown category
+                    mark_email_processed(mid, subject, sender, is_deal=False)
 
                 if new_count:
                     print(f"[POLLER] Processed {new_count} new emails")
