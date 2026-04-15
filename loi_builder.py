@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from docx import Document
-from docx.shared import Pt, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt, Inches, Twips
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 
 
 @dataclass
@@ -59,6 +59,14 @@ class LOITerms:
     closing_paragraphs: list[str] = field(default_factory=list)
 
 
+def _set_single_spacing(para):
+    """Force single spacing, zero before/after on a paragraph."""
+    fmt = para.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
+
+
 def _add_para(doc: Document, text: str, font_name: str = "Arial",
               font_size: float = 11.0, bold: bool = False,
               left_indent: float | None = None):
@@ -70,12 +78,14 @@ def _add_para(doc: Document, text: str, font_name: str = "Arial",
     run.font.bold = bold
     if left_indent is not None:
         para.paragraph_format.left_indent = Inches(left_indent)
+    _set_single_spacing(para)
     return para
 
 
 def _add_empty(doc: Document):
     """Add an empty paragraph."""
-    doc.add_paragraph()
+    para = doc.add_paragraph()
+    _set_single_spacing(para)
 
 
 def _add_labeled_section(doc: Document, label: str, text: str,
@@ -83,6 +93,7 @@ def _add_labeled_section(doc: Document, label: str, text: str,
     """Add a section like 'Property:\ttext...' with 1.5in indent."""
     para = doc.add_paragraph()
     para.paragraph_format.left_indent = Inches(1.5)
+    _set_single_spacing(para)
 
     # Label run
     label_run = para.add_run(f"{label}:\t")
@@ -112,10 +123,13 @@ def build_loi(terms: LOITerms) -> bytes:
         section.top_margin = Inches(1.0)
         section.bottom_margin = Inches(1.0)
 
-    # Set default font
+    # Set default font and spacing
     style = doc.styles["Normal"]
     style.font.name = "Arial"
     style.font.size = Pt(11)
+    style.paragraph_format.space_before = Pt(0)
+    style.paragraph_format.space_after = Pt(0)
+    style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
 
     # ── Date ──────────────────────────────────────────────────────────
     _add_para(doc, terms.date)
@@ -205,6 +219,7 @@ def build_loi(terms: LOITerms) -> bytes:
     # Retain all employees
     para = doc.add_paragraph()
     para.paragraph_format.left_indent = Inches(1.5)
+    _set_single_spacing(para)
     run = para.add_run("Buyer intends to retain all employees of the Company through closing.")
     run.font.name = "Arial"
     run.font.size = Pt(11)
@@ -368,6 +383,7 @@ def build_loi(terms: LOITerms) -> bytes:
     year = terms.date.split(",")[-1].strip() if "," in terms.date else "2026"
     accept = doc.add_paragraph()
     accept.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _set_single_spacing(accept)
     run = accept.add_run(f"Accepted on this ______ Day of _________, {year}")
     run.font.name = "Arial"
     run.font.size = Pt(11)
@@ -377,6 +393,7 @@ def build_loi(terms: LOITerms) -> bytes:
 
     company_accept = doc.add_paragraph()
     company_accept.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _set_single_spacing(company_accept)
     run = company_accept.add_run(f"{terms.company_name}.")
     run.font.name = "Arial"
     run.font.size = Pt(11)
@@ -387,6 +404,7 @@ def build_loi(terms: LOITerms) -> bytes:
 
     name_line = doc.add_paragraph()
     name_line.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _set_single_spacing(name_line)
     run = name_line.add_run("Name:")
     run.font.name = "Arial"
     run.font.size = Pt(11)
