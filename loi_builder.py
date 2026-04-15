@@ -82,17 +82,23 @@ def _add_para(doc: Document, text: str, font_name: str = "Arial",
     return para
 
 
-def _add_empty(doc: Document):
+def _add_empty(doc: Document, indent: float | None = None):
     """Add an empty paragraph."""
     para = doc.add_paragraph()
     _set_single_spacing(para)
+    if indent is not None:
+        para.paragraph_format.left_indent = Inches(indent)
 
 
 def _add_labeled_section(doc: Document, label: str, text: str,
                           bold_label: bool = False):
-    """Add a section like 'Property:\ttext...' with 1.5in indent."""
+    """Add a section like 'Property:\ttext...' with hanging indent.
+
+    Label starts at left margin (0"), body text wraps at 1.5".
+    """
     para = doc.add_paragraph()
     para.paragraph_format.left_indent = Inches(1.5)
+    para.paragraph_format.first_line_indent = Inches(-1.5)
     _set_single_spacing(para)
 
     # Label run
